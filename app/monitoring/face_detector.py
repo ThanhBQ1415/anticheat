@@ -1,7 +1,11 @@
+import logging
+from typing import Optional, Tuple
+
 import cv2
 import mediapipe as mp
 import numpy as np
-from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class FaceDetector:
@@ -32,8 +36,17 @@ class FaceDetector:
                 "height": int(bbox.height * h),
                 "confidence": detection.score[0],
             }
+            logger.info(
+                "FaceDetector: face detected (x=%s, y=%s, w=%s, h=%s, confidence=%.2f)",
+                face_data["x"],
+                face_data["y"],
+                face_data["width"],
+                face_data["height"],
+                face_data["confidence"],
+            )
             return True, face_data
 
+        logger.debug("FaceDetector: no face detected in current frame")
         return False, None
 
     def draw_face_box(self, frame: np.ndarray, face_data: dict) -> np.ndarray:
@@ -53,4 +66,5 @@ class FaceDetector:
     def release(self):
         """Release resources."""
         self.face_detection.close()
+        logger.debug("FaceDetector resources released")
 

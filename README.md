@@ -53,87 +53,119 @@ pip install -r requirements.txt
 
 With the virtual environment activated (`source .venv/bin/activate`):
 ```bash
-  python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8081
+# Optional: protect APIs with a bearer token
+export ANTICHEAT_BEARER_TOKEN="your-secret-token"
+
+# Start FastAPI (HTTP server)
+python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8081
 ```
 
 The service will run on `http://localhost:8081`
 
-### Live Camera Preview
+### HTTP Upload Flow (FE → BE)
 
-1. Gửi `POST /start-monitoring` với `session_id` cụ thể để yêu cầu backend mở camera.
-2. Trên FE, hiển thị video bằng cách trỏ một thẻ `<img>` hoặc phần tử `<video>` sử dụng nguồn `http://localhost:8081/stream/{session_id}` (đường dẫn trả về `multipart/x-mixed-replace`).
-3. Khi hoàn thành, gọi `POST /stop-monitoring` để giải phóng camera.
+1. FE gọi `POST /api/anti-cheat/session/start` để lấy `sessionId`.
+2. FE định kỳ gửi:
+   - Ảnh (JPEG) qua `POST /api/anti-cheat/frame` (multipart/form-data), header `X-Session-Id: <sessionId>`
+   - Khối audio PCM16 mono 16k qua `POST /api/anti-cheat/audio`, header `X-Session-Id: <sessionId>`
+3. Khi kết thúc, FE gọi `POST /api/anti-cheat/session/stop?sessionId=<sessionId>`.
 
 ## API Endpoints
 
-### POST /start-monitoring
-Start monitoring session.
+### POST /api/anti-cheat/session/start
+Tạo session theo dõi.
 
-Request:
-```json
-{
-  "exam_id": 1,
-  "student_id": 1,
-  "session_id": "session_123",
-  "camera_index": 0
-}
-```
+Request headers:
+- Authorization: `Bearer <ANTICHEAT_BEARER_TOKEN>` (nếu biến môi trường được thiết lập)
 
 Response:
 ```json
 {
-  "status": "started",
-  "session_id": "session_123",
-  "message": "Monitoring started successfully"
+  "sessionId": "session_123"
 }
 ```
 
-- Nếu không truyền `camera_index`, service sẽ tự dò camera khả dụng (0..5).  
-- Nếu không tìm thấy camera, `status` sẽ là `"camera_unavailable"`.
+Curl:
+```bash
+curl -X POST http://localhost:8081/api/anti-cheat/session/start \
+  -H "Authorization: Bearer $ANTICHEAT_BEARER_TOKEN"
+```
 
-### GET /cameras
-Liệt kê các chỉ số camera khả dụng trên máy backend.
+### POST /api/anti-cheat/session/stop
+Dừng session theo dõi.
+
+Query:
+```
+?sessionId=session_123
+```
+
+Request headers:
+- Authorization: `Bearer <ANTICHEAT_BEARER_TOKEN>` (nếu bật)
+
+Curl:
+```bash
+curl -X POST "http://localhost:8081/api/anti-cheat/session/stop?sessionId=session_123" \
+  -H "Authorization: Bearer $ANTICHEAT_BEARER_TOKEN"
+```
+
+### POST /api/anti-cheat/frame
+Gửi 1 khung hình (JPEG/PNG) để phân tích khuôn mặt và ánh nhìn.
+
+Headers:
+- Authorization: `Bearer <ANTICHEAT_BEARER_TOKEN>` (nếu bật)
+- X-Session-Id: `<sessionId>`
+
+Multipart form-data:
+- file: ảnh `image/jpeg` hoặc `image/png`
 
 Response:
 ```json
 {
-  "available_indices": [0],
-  "probed": [0,1,2,3,4,5]
+  "alerts": ["no_face", "looking_away"],
+  "face": { "x": 100, "y": 80, "width": 120, "height": 120, "confidence": 0.85 },
+  "metrics": { "faceConfidence": 0.85 },
+  "message": "Looking away detected for 5.2 seconds"
 }
 ```
 
-### POST /stop-monitoring
-Stop monitoring session.
+Curl:
+```bash
+curl -X POST http://localhost:8081/api/anti-cheat/frame \
+  -H "Authorization: Bearer $ANTICHEAT_BEARER_TOKEN" \
+  -H "X-Session-Id: session_123" \
+  -F "file=@/path/to/frame.jpg;type=image/jpeg"
+```
 
-Request:
+### POST /api/anti-cheat/audio
+Gửi 1 khối audio thô (raw PCM16 mono 16k) để phát hiện giọng nói.
+
+Headers:
+- Authorization: `Bearer <ANTICHEAT_BEARER_TOKEN>` (nếu bật)
+- X-Session-Id: `<sessionId>`
+
+Multipart form-data:
+- file: `application/octet-stream` (bytes PCM16 mono 16k)
+
+Response:
 ```json
 {
-  "session_id": "session_123"
+  "alerts": ["speech_detected"],
+  "metrics": { "speech": true }
 }
 ```
 
-### GET /check-violation/{session_id}
-Check violation status for a session.
+Curl (ví dụ với file nhị phân đã có sẵn):
+```bash
+curl -X POST http://localhost:8081/api/anti-cheat/audio \
+  -H "Authorization: Bearer $ANTICHEAT_BEARER_TOKEN" \
+  -H "X-Session-Id: session_123" \
+  -F "file=@/path/to/chunk.pcm;type=application/octet-stream"
+```
 
 ### GET /health
 Health check endpoint.
 
-## WebSocket
-
-### WebSocket Endpoint: /ws/{session_id}
-
-Connect to WebSocket for real-time violation notifications.
-
-Violation event format:
-```json
-{
-  "type": "violation",
-  "violation_type": "eye_gaze",
-  "timestamp": "2024-01-01T00:00:00Z",
-  "message": "Looking away detected for 5 seconds",
-  "session_id": "session_123"
-}
-```
+> Ghi chú: Bản này sử dụng HTTP upload thay vì WebSocket để truyền ảnh/âm thanh.
 
 ## Violation Types
 

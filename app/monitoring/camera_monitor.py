@@ -2,6 +2,7 @@ import cv2
 import threading
 import time
 import queue
+import base64
 from typing import Optional
 import numpy as np
 from .face_detector import FaceDetector
@@ -10,9 +11,7 @@ from .voice_detector import VoiceDetector
 
 
 class CameraMonitor:
-    def __init__(self, camera_index: int = 0, violation_queue: Optional[queue.Queue] = None):
-        self.camera_index = camera_index
-        self.cap: Optional[cv2.VideoCapture] = None
+    def __init__(self, violation_queue: Optional[queue.Queue] = None):
         self.is_monitoring = False
         self.monitoring_thread: Optional[threading.Thread] = None
         
@@ -35,63 +34,58 @@ class CameraMonitor:
         self.frame_lock = threading.Lock()
         self.monitor_start_time: float = 0.0
         self.startup_grace_period = 5.0  # seconds to ignore violations after start
+        self.frame_queue = queue.Queue(maxsize=10)  # Queue for frames from frontend
 
     def start_monitoring(self):
-        """Start monitoring camera and microphone."""
+        """Start monitoring with frames from frontend."""
         if self.is_monitoring:
+            print("[CameraMonitor] Monitoring already started")
             return
 
         try:
-            # Open camera
-            self.cap = cv2.VideoCapture(self.camera_index)
-            if not self.cap.isOpened():
-                # Try default camera
-                self.cap = cv2.VideoCapture(0)
-                if not self.cap.isOpened():
-                    raise Exception(f"Could not open camera. Please ensure camera is connected and accessible.")
-            
-            # Set camera properties
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            self.cap.set(cv2.CAP_PROP_FPS, self.frame_rate)
-            
+            print("[CameraMonitor] Starting monitoring...")
             # Start voice monitoring (may fail if microphone is not available)
             try:
                 self.voice_detector.start_monitoring()
+                print("[CameraMonitor] Voice monitoring started")
             except Exception as mic_error:
-                print(f"Warning: Could not start voice monitoring: {mic_error}")
+                print(f"[CameraMonitor] Warning: Could not start voice monitoring: {mic_error}")
                 # Continue without voice detection
             
-            # Start camera monitoring thread
+            # Start frame processing thread (waits for frames from frontend)
             self.is_monitoring = True
             self.monitor_start_time = time.time()
             self.last_voice_check_time = self.monitor_start_time
             self.last_face_detection_time = self.monitor_start_time
-            self.monitoring_thread = threading.Thread(target=self._monitor_camera, daemon=True)
+            self.monitoring_thread = threading.Thread(target=self._process_frames, daemon=True)
             self.monitoring_thread.start()
+            print("[CameraMonitor] Monitoring started successfully, waiting for frames from frontend...")
             
         except Exception as e:
-            print(f"Error starting camera monitoring: {e}")
-            # Don't raise exception - allow service to continue
-            # Camera monitoring may not work, but WebSocket connections will
+            print(f"[CameraMonitor] Error starting monitoring: {e}")
             self.is_monitoring = False
-            if self.cap:
-                try:
-                    self.cap.release()
-                except:
-                    pass
-                self.cap = None
 
-    def _monitor_camera(self):
-        """Monitor camera in background thread."""
+    def _process_frames(self):
+        """Process frames from frontend in background thread."""
+        frame_count = 0
+        print("[CameraMonitor] Frame processing thread started")
         while self.is_monitoring:
             try:
-                if self.cap is None or not self.cap.isOpened():
-                    break
+                # Wait for frame from frontend (with timeout to check if still monitoring)
+                try:
+                    frame = self.frame_queue.get(timeout=1.0)
+                except queue.Empty:
+                    # Log every 10 seconds if no frames received
+                    if frame_count == 0:
+                        print("[CameraMonitor] Waiting for frames from frontend...")
+                    continue
                 
-                ret, frame = self.cap.read()
-                if not ret:
-                    break
+                if frame is None:
+                    continue
+                
+                frame_count += 1
+                if frame_count % 30 == 0:  # Log every 30 frames (~1 second at 30fps)
+                    print(f"[CameraMonitor] Processing frame #{frame_count}")
                 
                 with self.frame_lock:
                     self.latest_frame = frame.copy()
@@ -99,12 +93,37 @@ class CameraMonitor:
                 # Process frame for violations
                 self._process_frame(frame)
                 
-                # Control frame rate
-                time.sleep(self.frame_interval)
-                
             except Exception as e:
-                print(f"Error in camera monitoring: {e}")
+                print(f"[CameraMonitor] Error processing frames: {e}")
+                import traceback
+                traceback.print_exc()
                 break
+        print("[CameraMonitor] Frame processing thread stopped")
+    
+    def receive_frame(self, frame_data: str):
+        """Receive frame from frontend (base64 encoded image)."""
+        try:
+            # Decode base64 image
+            if frame_data.startswith('data:image'):
+                # Remove data URL prefix if present
+                frame_data = frame_data.split(',')[1]
+            
+            image_bytes = base64.b64decode(frame_data)
+            nparr = np.frombuffer(image_bytes, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if frame is not None:
+                # Put frame in queue (non-blocking, drop if queue is full)
+                try:
+                    self.frame_queue.put_nowait(frame)
+                except queue.Full:
+                    print("[CameraMonitor] Warning: Frame queue is full, dropping frame")
+            else:
+                print("[CameraMonitor] Warning: Failed to decode frame from base64")
+        except Exception as e:
+            print(f"[CameraMonitor] Error receiving frame: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _process_frame(self, frame: np.ndarray):
         """Process frame to detect violations."""
@@ -115,6 +134,11 @@ class CameraMonitor:
             self.last_face_detection_time = current_time
             self.last_voice_check_time = current_time
             return
+        
+        # Log first frame after grace period
+        if not hasattr(self, '_first_frame_logged'):
+            print(f"[CameraMonitor] Processing first frame after grace period (frame shape: {frame.shape})")
+            self._first_frame_logged = True
         
         # 1. Face presence detection
         is_face_present, face_data = self.face_detector.detect_face(frame)
@@ -160,35 +184,31 @@ class CameraMonitor:
                 return
 
     def get_frame(self) -> Optional[np.ndarray]:
-        """Get current frame from camera."""
-        if self.cap is None or not self.cap.isOpened():
-            return None
-        
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        
-        return frame
+        """Get current frame (from latest received frame)."""
+        with self.frame_lock:
+            if self.latest_frame is None:
+                return None
+            return self.latest_frame.copy()
 
     def stop_monitoring(self):
-        """Stop monitoring camera and microphone."""
+        """Stop monitoring."""
         self.is_monitoring = False
         
         if self.monitoring_thread:
             self.monitoring_thread.join(timeout=2.0)
-        
-        if self.cap:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
         
         self.voice_detector.stop_monitoring()
         self.last_face_detection_time = None
         with self.frame_lock:
             self.latest_frame = None
         self.monitor_start_time = 0.0
+        
+        # Clear frame queue
+        while not self.frame_queue.empty():
+            try:
+                self.frame_queue.get_nowait()
+            except queue.Empty:
+                break
 
     def release(self):
         """Release all resources."""
@@ -205,6 +225,6 @@ class CameraMonitor:
             return self.latest_frame.copy()
 
     def is_camera_open(self) -> bool:
-        """Check if the underlying camera device is currently opened."""
-        return self.cap is not None and self.cap.isOpened()
+        """Check if monitoring is active (frames are being received)."""
+        return self.is_monitoring
 

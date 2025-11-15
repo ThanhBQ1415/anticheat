@@ -1,11 +1,25 @@
+# Core web framework
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 websockets>=12.0
+
+# Computer vision & face detection
 opencv-python>=4.8.0
 mediapipe>=0.10.0
 numpy>=1.24.0
+
+# Audio processing & voice detection
 webrtcvad>=2.0.10
-pydantic>=2.5.0
-python-multipart>=0.0.6
 pyaudio>=0.2.14
 
+# Data validation & serialization
+pydantic>=2.5.0
+python-multipart>=0.0.6
+
+# Development & testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.1
+black>=23.9.1
+isort>=5.12.0
+ruff>=0.1.6
+pre-commit>=3.4.0

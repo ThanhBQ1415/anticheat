@@ -1,189 +1,163 @@
+import logging
+import time
+from collections import deque
+from typing import Optional, Tuple
+
 import cv2
 import mediapipe as mp
 import numpy as np
-from typing import Tuple, Optional
-import time
+from mediapipe.framework.formats import landmark_pb2
+
+logger = logging.getLogger(__name__)
 
 
 class EyeTracker:
-    def __init__(self):
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
+    LEFT_EYE_CORNER_INDICES = (33, 133)         #góc mắt trái
+    LEFT_IRIS_INDICES = (468, 469, 470, 471)    #điểm landmark con ngươi
 
-        # Eye landmarks indices (left and right eye)
-        self.LEFT_EYE_INDICES = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
-        self.RIGHT_EYE_INDICES = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+    RIGHT_EYE_CORNER_INDICES = (362, 263)        #góc mắt phải
+    RIGHT_IRIS_INDICES = (473, 474, 475, 476)    #điểm landmark con ngươi
 
-        # Looking away threshold (in degrees)
-        self.LOOK_AWAY_THRESHOLD = 30  # degrees
-        self.look_away_start_time: Optional[float] = None
-        self.LOOK_AWAY_DURATION = 5.0  # seconds
-
-    def calculate_eye_aspect_ratio(self, landmarks, eye_indices):
-        """Calculate Eye Aspect Ratio (EAR) to detect if eyes are open."""
-        eye_points = np.array([(landmarks[i].x, landmarks[i].y) for i in eye_indices])
-        
-        # Calculate distances
-        vertical_1 = np.linalg.norm(eye_points[1] - eye_points[5])
-        vertical_2 = np.linalg.norm(eye_points[2] - eye_points[4])
-        horizontal = np.linalg.norm(eye_points[0] - eye_points[3])
-        
-        # Calculate EAR
-        ear = (vertical_1 + vertical_2) / (2.0 * horizontal)
-        return ear
-
-    def calculate_head_pose(self, landmarks, frame_shape):
-        """Calculate head pose to detect if user is looking away."""
-        h, w = frame_shape[:2]
-        
-        # Get key facial landmarks for head pose estimation
-        # Landmarks indices reference (MediaPipe FaceMesh):
-        # 1: Nose tip, 33: Left eye corner, 263: Right eye corner,
-        # 175: Chin, 10: Forehead (glabella area),
-        # 61: Mouth left corner, 291: Mouth right corner
-        try:
-            nose_tip = landmarks[1]
-            left_eye = landmarks[33]
-            right_eye = landmarks[263]
-            chin = landmarks[175]
-            forehead = landmarks[10]
-            mouth_left = landmarks[61]
-            mouth_right = landmarks[291]
-        except Exception:
-            return None, None, None
-
-        # Convert to image coordinates
-        image_points = np.array([
-            (nose_tip.x * w, nose_tip.y * h),
-            (left_eye.x * w, left_eye.y * h),
-            (right_eye.x * w, right_eye.y * h),
-            (chin.x * w, chin.y * h),
-            (forehead.x * w, forehead.y * h),
-            (mouth_left.x * w, mouth_left.y * h),
-            (mouth_right.x * w, mouth_right.y * h),
-        ], dtype=np.float32)
-
-        # 3D model points (approximate).
-        # Units here are arbitrary but should keep relative geometry.
-        model_points = np.array([
-            (0.0,    0.0,    0.0),     # Nose tip
-            (-225.0, 170.0, -135.0),   # Left eye
-            (225.0,  170.0, -135.0),   # Right eye
-            (0.0,    330.0,  -65.0),   # Chin
-            (0.0,   -200.0, -100.0),   # Forehead
-            (-150.0, -50.0, -125.0),   # Mouth left
-            (150.0,  -50.0, -125.0),   # Mouth right
-        ], dtype=np.float32)
-
-        # Camera internals (approximate)
-        focal_length = w
-        center = (w / 2, h / 2)
-        camera_matrix = np.array(
-            [[focal_length, 0, center[0]], [0, focal_length, center[1]], [0, 0, 1]],
-            dtype=np.float32,
-        )
-
-        dist_coeffs = np.zeros((4, 1))
-
-        # Solve PnP
-        try:
-            success, rotation_vector, translation_vector = cv2.solvePnP(
-                model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
+    #khởi tạo và thiết lập tham số
+    def __init__(self, predictor_path: Optional[str] = None):
+        if predictor_path:
+            logger.warning(
+                "EyeTracker: predictor_path argument is ignored in MediaPipe pipeline"
             )
-        except Exception:
-            return None, None, None
 
-        if success:
-            # Convert rotation vector to rotation matrix
-            rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-            
-            # Calculate Euler angles
-            sy = np.sqrt(rotation_matrix[0, 0] * rotation_matrix[0, 0] + rotation_matrix[1, 0] * rotation_matrix[1, 0])
-            singular = sy < 1e-6
+        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=False,  #xử lý video realtime
+            max_num_faces=1,         #xử lý tối đa 1 khuôn mặt
+            refine_landmarks=True,   #cải thiện độ chính xác của các điểm landmark
+            min_detection_confidence=0.5, #độ tin cậy tối thiểu để xác định khuôn mặt
+            min_tracking_confidence=0.5, #độ tin cậy tối thiểu để theo dõi khuôn mặt
+        )
 
-            if not singular:
-                x = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
-                y = np.arctan2(-rotation_matrix[2, 0], sy)
-                z = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
-            else:
-                x = np.arctan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
-                y = np.arctan2(-rotation_matrix[2, 0], sy)
-                z = 0
+        self.CONSECUTIVE_LOOK_AWAY_FRAMES = 7 #số frame liên tục nhìn ra ngoài để vi phạm
+        self.GAZE_MIN_THRESHOLD = 0.4 #ngưỡng tối thiểu (nhìn trái)
+        self.GAZE_MAX_THRESHOLD = 0.6 #ngưỡng tối đa (nhìn phải)
 
-            # Convert to degrees
-            pitch = np.degrees(x)
-            yaw = np.degrees(y)
-            roll = np.degrees(z)
+        self.consecutive_look_away_count = 0 #đếm số frame liên tục nhìn ra ngoài
 
-            return pitch, yaw, roll
+        logger.info("EyeTracker: using MediaPipe FaceMesh with iris landmarks") #log thông tin về việc sử dụng MediaPipe FaceMesh với các điểm landmark mắt         #điểm landmark mắt là các điểm trên khuôn mặt mà ta có thể sử dụng để xác định rằng người dùng đang nhìn xa
 
-        return None, None, None
+
+
+        #tính toán tỉ lệ vị trí iris trong mắt
+    def _compute_eye_ratio(
+        self,
+        face_landmarks: landmark_pb2.NormalizedLandmarkList,
+        corner_indices: Tuple[int, int],
+        iris_indices: Tuple[int, int, int, int],
+        flip_horizontal: bool,
+    ) -> Optional[float]:
+        landmarks = face_landmarks.landmark
+
+        try:
+            corners_x = [landmarks[idx].x for idx in corner_indices]
+            iris_points_x = [landmarks[idx].x for idx in iris_indices]
+        except IndexError:
+            return None
+
+        if not iris_points_x:
+            return None
+
+        iris_center_x = float(np.mean(iris_points_x))
+        min_corner = float(np.min(corners_x))
+        max_corner = float(np.max(corners_x))
+        denominator = max_corner - min_corner
+        if denominator <= 1e-6:
+            return None
+
+        ratio = (iris_center_x - min_corner) / denominator
+        if flip_horizontal:
+            ratio = 1.0 - ratio
+        return float(np.clip(ratio, 0.0, 1.0))
+
+
+
+
+    #tính toán tỉ lệ iris trung bình 2 mắt
+    def _get_iris_ratio(
+        self, face_landmarks: landmark_pb2.NormalizedLandmarkList
+    ) -> Optional[Tuple[float, float]]:
+        left_ratio = self._compute_eye_ratio(
+            face_landmarks,
+            self.LEFT_EYE_CORNER_INDICES,
+            self.LEFT_IRIS_INDICES,
+            flip_horizontal=False,
+        )
+        right_ratio = self._compute_eye_ratio(
+            face_landmarks,
+            self.RIGHT_EYE_CORNER_INDICES,
+            self.RIGHT_IRIS_INDICES,
+            flip_horizontal=True,
+        )
+
+        if left_ratio is None or right_ratio is None:
+            return None
+        return (left_ratio, right_ratio)
 
     def is_looking_away(self, frame: np.ndarray) -> Tuple[bool, Optional[str]]:
-        """
-        Check if user is looking away.
-        Returns: (is_looking_away, message)
-        """
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb_frame)
 
         if not results.multi_face_landmarks:
+            self._reset_look_away_state()
             return False, None
 
         face_landmarks = results.multi_face_landmarks[0]
-        landmarks = face_landmarks.landmark
-
-        # Calculate head pose
-        pitch, yaw, roll = self.calculate_head_pose(landmarks, frame.shape)
-
-        if pitch is None or yaw is None:
+        ratios = self._get_iris_ratio(face_landmarks)
+        
+        if ratios is None:
+            self.consecutive_look_away_count = 0
             return False, None
 
-        # Check if looking away (yaw angle indicates left/right looking)
-        is_looking_away = abs(yaw) > self.LOOK_AWAY_THRESHOLD or abs(pitch) > 25
-
-        current_time = time.time()
-
-        if is_looking_away:
-            if self.look_away_start_time is None:
-                self.look_away_start_time = current_time
-            else:
-                # Check if looking away for 5+ seconds
-                elapsed = current_time - self.look_away_start_time
-                if elapsed >= self.LOOK_AWAY_DURATION:
-                    self.look_away_start_time = None
-                    return True, f"Looking away detected for {elapsed:.1f} seconds"
+        left_ratio, right_ratio = ratios
+        logger.info(f"left_ratio: {left_ratio}, right_ratio: {right_ratio}")
+        
+        left_in_range = self.GAZE_MIN_THRESHOLD < left_ratio < self.GAZE_MAX_THRESHOLD
+        right_in_range = self.GAZE_MIN_THRESHOLD < right_ratio < self.GAZE_MAX_THRESHOLD
+    
+        if left_in_range or right_in_range:
+            is_looking_away = False
+            logger.debug(
+                "EyeTracker: at least one eye in range (left=%.3f, right=%.3f)",
+                left_ratio,
+                right_ratio,
+            )
         else:
-            # Reset timer if looking at screen
-            self.look_away_start_time = None
+            is_looking_away = True
+            logger.info(
+                "EyeTracker: both eyes out of range (left=%.3f, right=%.3f)",
+                left_ratio,
+                right_ratio,
+            )
+        if is_looking_away:
+            self.consecutive_look_away_count += 1
+            logger.info(
+                "EyeTracker: look-away detected (count=%d/%d)",
+                self.consecutive_look_away_count,
+                self.CONSECUTIVE_LOOK_AWAY_FRAMES,
+            )
+            if self.consecutive_look_away_count >= self.CONSECUTIVE_LOOK_AWAY_FRAMES:
+                message = f"Looking away detected ({self.consecutive_look_away_count} consecutive frames)"
+                logger.info("EyeTracker: confirmed look-away violation")
+                self.consecutive_look_away_count = 0 
+                return True, message
+        else:
+            if self.consecutive_look_away_count > 0:
+                logger.debug("EyeTracker: gaze back on screen. Resetting counter.")
+            self.consecutive_look_away_count = 0
 
         return False, None
 
-    def draw_landmarks(self, frame: np.ndarray) -> np.ndarray:
-        """Draw face mesh landmarks on frame."""
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(rgb_frame)
+    def _reset_look_away_state(self) -> None:
+        self.consecutive_look_away_count = 0
 
-        if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                self.mp_drawing.draw_landmarks(
-                    frame,
-                    face_landmarks,
-                    self.mp_face_mesh.FACEMESH_CONTOURS,
-                    None,
-                    self.mp_drawing_styles.get_default_face_mesh_contours_style(),
-                )
-
-        return frame
-
-    def release(self):
-        """Release resources."""
-        self.face_mesh.close()
+    def release(self) -> None:
+        if self.face_mesh is not None:
+            self.face_mesh.close()
+            self.face_mesh = None
+        logger.debug("EyeTracker: release called, MediaPipe resources released")
 
