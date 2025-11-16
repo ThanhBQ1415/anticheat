@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  anti-cheat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: anti-cheat-service
+    ports:
+      - "8081:8081"
+    environment:
+      - ANTICHEAT_BEARER_TOKEN=${ANTICHEAT_BEARER_TOKEN:-}
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8081/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - exam_network
+
+networks:
+  exam_network:
+    external: true
+
