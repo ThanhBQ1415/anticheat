@@ -26,24 +26,21 @@ class EyeTracker:
             )
 
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False,  #xử lý video realtime
-            max_num_faces=1,         #xử lý tối đa 1 khuôn mặt
-            refine_landmarks=True,   #cải thiện độ chính xác của các điểm landmark
-            min_detection_confidence=0.5, #độ tin cậy tối thiểu để xác định khuôn mặt
-            min_tracking_confidence=0.5, #độ tin cậy tối thiểu để theo dõi khuôn mặt
+            static_image_mode=False,  
+            max_num_faces=1,        
+            refine_landmarks=True,   
+            min_detection_confidence=0.5, 
+            min_tracking_confidence=0.5, 
         )
 
-        self.CONSECUTIVE_LOOK_AWAY_FRAMES = 7 #số frame liên tục nhìn ra ngoài để vi phạm
-        self.GAZE_MIN_THRESHOLD = 0.4 #ngưỡng tối thiểu (nhìn trái)
-        self.GAZE_MAX_THRESHOLD = 0.6 #ngưỡng tối đa (nhìn phải)
+        self.CONSECUTIVE_LOOK_AWAY_FRAMES = 5
+        self.GAZE_MIN_THRESHOLD = 0.4 
+        self.GAZE_MAX_THRESHOLD = 0.6 
 
-        self.consecutive_look_away_count = 0 #đếm số frame liên tục nhìn ra ngoài
+        self.consecutive_look_away_count = 0 
 
-        logger.info("EyeTracker: using MediaPipe FaceMesh with iris landmarks") #log thông tin về việc sử dụng MediaPipe FaceMesh với các điểm landmark mắt         #điểm landmark mắt là các điểm trên khuôn mặt mà ta có thể sử dụng để xác định rằng người dùng đang nhìn xa
+        logger.info("EyeTracker: using MediaPipe FaceMesh with iris landmarks") 
 
-
-
-        #tính toán tỉ lệ vị trí iris trong mắt
     def _compute_eye_ratio(
         self,
         face_landmarks: landmark_pb2.NormalizedLandmarkList,

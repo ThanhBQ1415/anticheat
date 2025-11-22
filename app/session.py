@@ -5,11 +5,13 @@ from typing import Dict, Optional
 
 
 class SessionInfo:
-    def __init__(self, session_id: str, created_at: float):
+    def __init__(self, session_id: str, created_at: float, exam_id: Optional[int] = None, student_id: Optional[int] = None):
         self.session_id = session_id
         self.created_at = created_at
         self.last_seen = created_at
         self.is_active = True
+        self.exam_id = exam_id
+        self.student_id = student_id
 
 
 class SessionManager:
@@ -18,11 +20,11 @@ class SessionManager:
         self._lock = threading.Lock()
         self._ttl_seconds = ttl_seconds
 
-    def create(self) -> str:
+    def create(self, exam_id: Optional[int] = None, student_id: Optional[int] = None) -> str:
         session_id = secrets.token_urlsafe(16)
         now = time.time()
         with self._lock:
-            self._sessions[session_id] = SessionInfo(session_id, now)
+            self._sessions[session_id] = SessionInfo(session_id, now, exam_id, student_id)
         return session_id
 
     def touch(self, session_id: str) -> Optional[SessionInfo]:
